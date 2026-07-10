@@ -1,0 +1,23 @@
+eternaltermlib
+Copyright 2026 True Positive LLC
+
+This product vendors and links source from Eternal Terminal
+(https://github.com/MisterTea/EternalTerminal), which is licensed under the
+Apache License, Version 2.0:
+
+    Copyright the Eternal Terminal authors.
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+The vendored Eternal Terminal source lives under extern/eternalterminal/ and
+retains its original Apache-2.0 license. First-party eternaltermlib source
+(include/, src/, test/) is also licensed Apache-2.0 (see LICENSE), matching
+upstream so the combined/distributed work is cleanly Apache-2.0 with this
+attribution preserved.
+
+Run a license audit before distributing any combined binary as hygiene —
+confirm no transitively-linked dependency (e.g. libsodium, protobuf) imposes
+stricter terms on the combined artifact.

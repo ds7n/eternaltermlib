@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+build/
+cmake-build-*/
+*.o
+*.a
+*.dylib
+*.so
+compile_commands.json
+.cache/
+.DS_Store

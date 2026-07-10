@@ -1,0 +1,3 @@
+[submodule "extern/eternalterminal"]
+	path = extern/eternalterminal
+	url = https://github.com/MisterTea/EternalTerminal
