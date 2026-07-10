@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Linux dev + test loop for eternaltermlib.
+#   docker compose build dev
+#   docker compose run --rm dev cmake -B build && docker compose run --rm dev cmake --build build
+#   docker compose run --rm dev ctest --test-dir build     # once tests exist
+# The `etserver` fixture (added with the test suite) lets the reconnect/roaming
+# tests run against a REAL Eternal Terminal server, mirroring semicolyn's
+# sshd/sshd-legacy fixtures.
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: eternaltermlib-dev
+    # Run as the host UID so build artifacts stay host-editable (set
+    # HOST_UID/HOST_GID when invoking, like semicolyn).
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /work
+    volumes:
+      - .:/work
+
+  # Eternal Terminal server fixture for integration tests. STUB — wired up with
+  # the test suite: builds etserver + etterminal from the vendored submodule (or
+  # an upstream image), plants a known id/passkey, exposes port 2022 so the
+  # dev container can exercise connect / stream / reconnect-replay.
+  # etserver:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.etserver
+  #   image: eternaltermlib-etserver
+  #   healthcheck:
+  #     test: ["CMD", "nc", "-z", "127.0.0.1", "2022"]
+  #     interval: 1s
+  #     timeout: 3s
+  #     retries: 30
+  #     start_period: 2s

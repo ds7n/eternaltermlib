@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+
+# eternaltermlib Linux dev image: C/C++ toolchain for building the Eternal
+# Terminal transport core + our shim, running the Linux test suite, and serving
+# clangd to the C LSP MCP. Mirrors semicolyn's semicolyn-dev pattern (build in a
+# container, keep the host clean).
+FROM ubuntu:24.04
+
+# Toolchain: clang + clangd (LSP), cmake/ninja (build), plus ET's transport deps
+# (libsodium = secretbox crypto; protobuf-lite = wire messages). git for the
+# submodule; pkg-config for dep discovery.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates git pkg-config \
+        clang clangd clang-format \
+        cmake ninja-build \
+        libsodium-dev \
+        protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
