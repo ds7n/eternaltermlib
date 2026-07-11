@@ -35,8 +35,8 @@ TEST(SessionPayload, TerminalBufferPreservesBytes) {
                                      sizeof bytes));
 }
 
-// Security regression (report finding #1): the session's inbound decode must
-// NOT route untrusted server payloads through ET's stringToProto<>(), which
+// Security regression: the session's inbound decode must NOT route untrusted
+// server payloads through ET's stringToProto<>(), which
 // calls LOG(FATAL) -> abort() on a parse failure -- a malformed frame from a
 // hostile/compromised server would otherwise crash the whole embedding app.
 // session.cpp was changed to use ParseFromString() directly and handle the
@@ -114,7 +114,7 @@ struct EndLatch {
 };
 }  // namespace
 
-// Security report finding #4: after a session self-terminates (natural on_end,
+// Security regression: after a session self-terminates (natural on_end,
 // NOT et_close), a subsequent et_send must report ET_ERR_CLOSED rather than a
 // false success -- the transport thread is gone, so the bytes could never be
 // sent. Connect to an unlikely-listening port so the session ends on its own;

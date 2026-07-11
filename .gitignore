@@ -11,3 +11,9 @@ compile_commands.json
 .cache/
 .DS_Store
 .mcp.json
+
+# Internal working artifacts — never published (design/planning narrative +
+# audit reports that map every examined weakness). Kept private.
+docs/superpowers/
+plans/
+.superpowers/
