@@ -16,6 +16,20 @@ int main(void) {
   et_config bad = {0};
   bad.id = "id"; bad.passkey = "key";
   assert(et_connect(&bad, &cbs, NULL) == NULL);
+
+  /* A NULL callback pointer must fail safe with a NULL return, NOT a crash on
+   * the transport thread. Use an otherwise-valid config so the callback guard
+   * (not the config guard) is what rejects it. Each of the three callbacks is
+   * required; test each NULL independently. */
+  et_config ok = {0};
+  ok.host = "h"; ok.id = "id"; ok.passkey = "key";
+  et_callbacks no_bytes = { NULL,     on_state, on_end };
+  et_callbacks no_state = { on_bytes, NULL,     on_end };
+  et_callbacks no_end   = { on_bytes, on_state, NULL    };
+  assert(et_connect(&ok, &no_bytes, NULL) == NULL);
+  assert(et_connect(&ok, &no_state, NULL) == NULL);
+  assert(et_connect(&ok, &no_end,   NULL) == NULL);
+
   /* et_send on NULL handle -> ET_ERR_INVALID (not a crash, not 0). */
   assert(et_send(NULL, (const uint8_t*)"x", 1) == ET_ERR_INVALID);
   /* et_close(NULL) is a safe no-op. */

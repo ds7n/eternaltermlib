@@ -161,7 +161,18 @@ void et_session::run() {
           emitState(ET_STATE_DISCONNECTED);
           return;
         }
-        auto resp = stringToProto<InitialResponse>(pl);
+        // Parse the server's INITIAL_RESPONSE directly rather than via ET's
+        // stringToProto<>(): that helper calls LOG(FATAL) -> abort() on a
+        // parse failure, so an untrusted server sending a malformed payload
+        // would crash the whole embedding process. Handle failure ourselves
+        // and fail CLOSED -- a response we cannot parse is not a valid
+        // handshake, so we reject rather than proceed to CONNECTED.
+        InitialResponse resp;
+        if (!resp.ParseFromString(pl)) {
+          cbs.on_end(ctx, "malformed initial response");
+          emitState(ET_STATE_DISCONNECTED);
+          return;
+        }
         if (resp.has_error()) {
           cbs.on_end(ctx, ("handshake rejected: " + resp.error()).c_str());
           emitState(ET_STATE_DISCONNECTED);
@@ -217,9 +228,15 @@ void et_session::run() {
         std::string pl;
         if (!transport->read(&h, &pl)) break;
         keepaliveTime = time(nullptr) + keepalive_secs;
-        if (h == TerminalPacketType::TERMINAL_BUFFER)
-          coalesced += stringToProto<TerminalBuffer>(pl).buffer();
-        else if (h == TerminalPacketType::KEEP_ALIVE)
+        if (h == TerminalPacketType::TERMINAL_BUFFER) {
+          // Parse directly instead of via ET's stringToProto<>(), which
+          // aborts the process (LOG(FATAL)) on a parse failure. An untrusted
+          // server could otherwise crash the app with one malformed frame.
+          // A frame we cannot parse is dropped (the session continues), the
+          // same disposition as an unknown packet type below.
+          TerminalBuffer tb;
+          if (tb.ParseFromString(pl)) coalesced += tb.buffer();
+        } else if (h == TerminalPacketType::KEEP_ALIVE)
           waitingOnKeepalive = false;
         // else: PORT_FORWARD_* / unknown -> drop (out of scope).
       }

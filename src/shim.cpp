@@ -6,6 +6,12 @@
 extern "C" et_client *et_connect(const et_config *cfg,
                                  const et_callbacks *cbs, void *ctx) {
   if (!cfg || !cbs || !cfg->host || !cfg->id || !cfg->passkey) return nullptr;
+  // The three callbacks are the sole delivery mechanism and are all invoked
+  // unconditionally on the transport thread (on_state fires on the very first
+  // emitState); a NULL among them would be a NULL-function-pointer call ->
+  // crash. Reject here so bad config fails safe with a NULL return, per this
+  // ABI's documented contract, rather than crashing the internal thread.
+  if (!cbs->on_bytes || !cbs->on_state || !cbs->on_end) return nullptr;
   if (cfg->env_count && (!cfg->env_keys || !cfg->env_vals)) return nullptr;
   for (size_t i = 0; i < cfg->env_count; i++)
     if (!cfg->env_keys[i] || !cfg->env_vals[i]) return nullptr;

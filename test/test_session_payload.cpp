@@ -32,6 +32,37 @@ TEST(SessionPayload, TerminalBufferPreservesBytes) {
                                      sizeof bytes));
 }
 
+// Security regression (report finding #1): the session's inbound decode must
+// NOT route untrusted server payloads through ET's stringToProto<>(), which
+// calls LOG(FATAL) -> abort() on a parse failure -- a malformed frame from a
+// hostile/compromised server would otherwise crash the whole embedding app.
+// session.cpp was changed to use ParseFromString() directly and handle the
+// false return (drop the TERMINAL_BUFFER frame; fail-closed on a malformed
+// INITIAL_RESPONSE). This test pins the contract that decode relies on: a
+// malformed wire payload makes ParseFromString() return false (a value we can
+// branch on) rather than aborting, and leaves the message empty.
+//
+// The bytes below are deliberately invalid protobuf: field 1 tagged as
+// wire-type 6 (0x0e = (1<<3)|6), which is not a defined wire type, so the
+// lite parser rejects the message.
+TEST(SessionPayload, MalformedProtoParsesFalseNotAbort) {
+  const std::string malformed("\x0e\xff\xff\xff\xff", 5);
+
+  et::TerminalBuffer tb;
+  EXPECT_FALSE(tb.ParseFromString(malformed));  // rejected, not aborted
+  EXPECT_EQ(tb.buffer(), "");                   // safe empty on failure
+
+  et::InitialResponse resp;
+  EXPECT_FALSE(resp.ParseFromString(malformed));  // handshake would fail-closed
+
+  // Sanity: a WELL-formed TerminalBuffer still round-trips (guards against a
+  // fix that broke the happy path by over-rejecting).
+  const uint8_t good[] = {'h', 'i'};
+  et::TerminalBuffer ok;
+  ASSERT_TRUE(ok.ParseFromString(et::buildTerminalBuffer(good, sizeof good)));
+  EXPECT_EQ(ok.buffer(), "hi");
+}
+
 namespace {
 void noopBytes(void *, const uint8_t *, size_t) {}
 void noopState(void *, et_state) {}
