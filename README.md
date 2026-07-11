@@ -5,6 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # eternaltermlib
 
+[![ci](https://github.com/ds7n/eternaltermlib/actions/workflows/ci.yml/badge.svg)](https://github.com/ds7n/eternaltermlib/actions/workflows/ci.yml)
+[![ios-cross](https://github.com/ds7n/eternaltermlib/actions/workflows/ios-cross.yml/badge.svg)](https://github.com/ds7n/eternaltermlib/actions/workflows/ios-cross.yml)
+
 A **portable C client library for the [Eternal Terminal](https://github.com/MisterTea/EternalTerminal) (ET) transport** — the re-connectable, roaming-tolerant secure byte stream, exposed behind a small `extern "C"` callback API with **no PTY, no terminal, and no platform assumptions**.
 
 It wraps upstream ET's transport core (`src/base/`) so the resumable connection can be embedded anywhere a plain byte stream is wanted — an iOS/Android app, a Rust FFI consumer, a test harness — without shelling out to `ssh` or emulating a terminal.

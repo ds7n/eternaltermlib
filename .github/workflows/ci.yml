@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Linux CI: the real test suite. Builds eternaltermlib (our shim/session/
+# transport + the vendored ET src/base subset) and runs the unit tests
+# fixture-free, then the integration + roaming/replay tests against a live
+# etserver + toxiproxy via Docker Compose -- the same flow developers run
+# locally. Sanitizer builds (ASan + TSan) run the full suite too, since the
+# transport thread + self-pipe + registry are where a race would hide.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (fixture-free)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # ET + its nested external/* deps
+
+      - name: Build dev image
+        run: docker compose build dev
+
+      - name: Configure + build
+        run: |
+          HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --rm dev cmake -B build -G Ninja
+          HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --rm dev cmake --build build
+
+      - name: Unit tests (no fixture)
+        run: HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --rm dev ctest --test-dir build -LE ET_INTEGRATION --output-on-failure
+
+  integration:
+    name: Integration + roaming (live etserver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build images
+        run: |
+          docker compose build dev
+          docker compose --profile integration build etserver
+
+      - name: Start fixture (etserver + toxiproxy), wait healthy
+        run: docker compose --profile integration up -d --force-recreate --wait etserver toxiproxy
+
+      - name: Build
+        run: |
+          HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose --profile integration run --rm dev-integration cmake -B build -G Ninja
+          HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose --profile integration run --rm dev-integration cmake --build build
+
+      - name: Integration + roaming/replay
+        run: HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose --profile integration run --rm dev-integration ctest --test-dir build -L ET_INTEGRATION --output-on-failure
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile integration down
+
+  sanitizers:
+    name: ASan+UBSan / TSan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        san: [ON, thread]   # ON = ASan+UBSan, thread = TSan
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build images
+        run: |
+          docker compose build dev
+          docker compose --profile integration build etserver
+
+      - name: Start fixture
+        run: docker compose --profile integration up -d --force-recreate --wait etserver toxiproxy
+
+      - name: Build (sanitized) + full suite
+        run: |
+          HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose --profile integration run --rm dev-integration \
+            cmake -B build-san -G Ninja -DET_SANITIZE=${{ matrix.san }}
+          HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose --profile integration run --rm dev-integration \
+            cmake --build build-san
+          HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose --profile integration run --rm dev-integration \
+            ctest --test-dir build-san --output-on-failure
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile integration down
