@@ -59,15 +59,25 @@ jobs:
       # build tool, not a target lib, so the host protobuf is correct here.
       # (The protobuf-lite *runtime* for the iOS target is the open item below.)
 
-      - name: Build libsodium for iOS
+      - name: Cache iOS libsodium
+        id: sodium-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/libsodium/libsodium-ios
+          key: libsodium-ios-stable-v1
+
+      - name: Build libsodium for iOS (device + simulator only)
+        if: steps.sodium-cache.outputs.cache-hit != 'true'
         run: |
-          # Use libsodium's own Apple build script -> produces device + sim
-          # static libs. Pin to the version matching the vendored ET's needs.
+          # libsodium's dedicated iOS script builds ONLY the iOS device + sim
+          # slices (fast), unlike apple-xcframework.sh which builds all ~7 Apple
+          # platforms. Output: libsodium-ios/{include,lib}.
           git clone --depth 1 --branch stable https://github.com/jedisct1/libsodium.git /tmp/libsodium
           cd /tmp/libsodium
-          # Produces libsodium-apple/ with per-platform static libs + headers.
-          ./dist-build/apple-xcframework.sh
-          echo "SODIUM_APPLE=/tmp/libsodium/libsodium-apple" >> "$GITHUB_ENV"
+          ./dist-build/ios.sh
+
+      - name: Expose libsodium prefix
+        run: echo "SODIUM_APPLE=/tmp/libsodium/libsodium-ios" >> "$GITHUB_ENV"
 
       - name: Configure (iOS toolchain, OpenSSL dropped)
         id: configure
