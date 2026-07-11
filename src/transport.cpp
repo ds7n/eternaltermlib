@@ -4,6 +4,7 @@
 #include "ClientConnection.hpp"
 #include "TcpSocketHandler.hpp"
 #include "Headers.hpp"
+#include <sodium.h>  // sodium_memzero — scrub the passkey copy before free
 
 namespace et {
 
@@ -23,6 +24,9 @@ Transport::~Transport() {
   if (conn_) conn_->shutdown();
   conn_.reset();
   socketHandler_.reset();
+  // Scrub this second in-memory copy of the secretbox key (the session holds
+  // the other). std::string's destructor won't zero the buffer on its own.
+  if (!passkey_.empty()) sodium_memzero(&passkey_[0], passkey_.size());
 }
 
 bool Transport::connect() { return conn_->connect(); }

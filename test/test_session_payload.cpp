@@ -3,6 +3,9 @@
 #include "session_internal.hpp"
 #include "eternaltermlib.h"
 #include <gtest/gtest.h>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 TEST(SessionPayload, EnvMapRoundTrips) {
   const char *k[] = {"TERM", "LANG"};
@@ -91,4 +94,50 @@ TEST(SessionPayload, CloseIsIdempotent) {
 
   et_close(c);  // first call: tears down and frees
   et_close(c);  // second call on the same (now-dangling) pointer: must be a no-op
+}
+
+namespace {
+struct EndLatch {
+  std::mutex m;
+  std::condition_variable cv;
+  bool ended = false;
+  static void onEnd(void *ctx, const char *) {
+    auto *l = static_cast<EndLatch *>(ctx);
+    std::lock_guard<std::mutex> g(l->m);
+    l->ended = true;
+    l->cv.notify_all();
+  }
+  bool wait() {
+    std::unique_lock<std::mutex> lk(m);
+    return cv.wait_for(lk, std::chrono::seconds(10), [&] { return ended; });
+  }
+};
+}  // namespace
+
+// Security report finding #4: after a session self-terminates (natural on_end,
+// NOT et_close), a subsequent et_send must report ET_ERR_CLOSED rather than a
+// false success -- the transport thread is gone, so the bytes could never be
+// sent. Connect to an unlikely-listening port so the session ends on its own;
+// then et_send AFTER on_end must be ET_ERR_CLOSED.
+TEST(SessionPayload, SendAfterNaturalEndReportsClosed) {
+  EndLatch latch;
+  et_callbacks cbs = {noopBytes, noopState, EndLatch::onEnd};
+  et_config cfg = {};
+  cfg.host = "127.0.0.1";
+  cfg.port = 1;  // unlikely-to-be-listening -> connect fails -> natural on_end
+  cfg.id = "0123456789abcdef";
+  cfg.passkey = "01234567890123456789012345678901";
+  cfg.cols = 80;
+  cfg.rows = 24;
+
+  et_client *c = et_connect(&cfg, &cbs, &latch);
+  ASSERT_NE(c, nullptr);
+  ASSERT_TRUE(latch.wait());  // session has self-terminated (on_end fired)
+
+  // The handle is still allocated (not yet et_close'd) but ended: send/resize
+  // must fail closed, not report a false success.
+  EXPECT_EQ(et_send(c, (const uint8_t *)"x", 1), ET_ERR_CLOSED);
+  EXPECT_EQ(et_set_window_size(c, 100, 40, 0, 0), ET_ERR_CLOSED);
+
+  et_close(c);
 }

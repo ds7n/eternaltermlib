@@ -54,6 +54,7 @@ std::string buildTerminalInfo(uint16_t cols, uint16_t rows,
 #include <unistd.h>
 #include <unordered_set>
 #include <sys/select.h>
+#include <sodium.h>  // sodium_memzero — scrub the passkey before free
 
 namespace {
 struct OutItem {
@@ -75,7 +76,23 @@ struct et_session {
   std::deque<OutItem> outq;
   int wake_r = -1, wake_w = -1;  // self-pipe
   std::atomic<bool> stopping{false};
+  // Set by run() when the session terminates on its own (remote exit, fatal
+  // error) -- distinct from `stopping`, which only et_session_close sets. A
+  // post-on_end et_send/et_resize on a not-yet-closed handle must report
+  // ET_ERR_CLOSED, not a false success for bytes that can never transmit.
+  std::atomic<bool> ended{false};
   et_state lastState = ET_STATE_CONNECTING;
+
+  // Destructor owns final cleanup so both the normal et_session_close path and
+  // the exception-unwind path in et_session_start release resources:
+  //  - scrub the secretbox key (std::string's dtor does not zero its buffer;
+  //    sodium_memzero is a barrier-guarded wipe that won't be optimized away),
+  //  - close the self-pipe fds (guarded, idempotent against -1).
+  ~et_session() {
+    if (!passkey.empty()) sodium_memzero(&passkey[0], passkey.size());
+    if (wake_r >= 0) close(wake_r);
+    if (wake_w >= 0) close(wake_w);
+  }
 
   void emitState(et_state s) {
     if (s != lastState) {
@@ -94,6 +111,15 @@ struct et_session {
       outq.push_back({h, std::move(p)});
     }
     wake();
+  }
+  // Terminal exit: mark the session ended (so a post-on_end et_send returns
+  // ET_ERR_CLOSED rather than a false success), fire on_end with `reason`,
+  // then transition to DISCONNECTED. Every path that ends run() goes through
+  // here so `ended` is always set before on_end.
+  void terminate(const char *reason) {
+    ended.store(true);
+    cbs.on_end(ctx, reason);
+    emitState(ET_STATE_DISCONNECTED);
   }
   void run();  // the loop
 };
@@ -133,8 +159,7 @@ bool claimForClose(et_session *s) {
 void et_session::run() {
   emitState(ET_STATE_CONNECTING);
   if (!transport->connect()) {
-    cbs.on_end(ctx, "connect failed");
-    emitState(ET_STATE_DISCONNECTED);
+    terminate("connect failed");
     return;
   }
 
@@ -157,8 +182,7 @@ void et_session::run() {
       std::string pl;
       if (transport->read(&h, &pl)) {
         if (h != EtPacketType::INITIAL_RESPONSE) {
-          cbs.on_end(ctx, "missing initial response");
-          emitState(ET_STATE_DISCONNECTED);
+          terminate("missing initial response");
           return;
         }
         // Parse the server's INITIAL_RESPONSE directly rather than via ET's
@@ -169,13 +193,11 @@ void et_session::run() {
         // handshake, so we reject rather than proceed to CONNECTED.
         InitialResponse resp;
         if (!resp.ParseFromString(pl)) {
-          cbs.on_end(ctx, "malformed initial response");
-          emitState(ET_STATE_DISCONNECTED);
+          terminate("malformed initial response");
           return;
         }
         if (resp.has_error()) {
-          cbs.on_end(ctx, ("handshake rejected: " + resp.error()).c_str());
-          emitState(ET_STATE_DISCONNECTED);
+          terminate(("handshake rejected: " + resp.error()).c_str());
           return;
         }
         ok = true;
@@ -183,8 +205,7 @@ void et_session::run() {
     }
   }
   if (!ok) {
-    cbs.on_end(ctx, "handshake timeout");
-    emitState(ET_STATE_DISCONNECTED);
+    terminate("handshake timeout");
     return;
   }
 
@@ -272,13 +293,17 @@ void et_session::run() {
     }
     if (fd < 0) waitingOnKeepalive = false;
   }
-  cbs.on_end(ctx, stopping.load() ? "closed" : "session ended");
-  emitState(ET_STATE_DISCONNECTED);
+  terminate(stopping.load() ? "closed" : "session ended");
 }
 
 et_session *et_session_start(const et_config *cfg, const et_callbacks *cbs,
-                             void *ctx) {
-  auto *s = new et_session();
+                             void *ctx) try {
+  // Own `s` via unique_ptr through the fallible setup: if buildInitialPayload,
+  // the Transport ctor, or the thread spawn throws, the unique_ptr frees the
+  // session (its destructor closes any opened pipe fds -- see below) instead
+  // of leaking, and the catch clause below stops the exception from crossing
+  // the extern "C" boundary (UB for a C ABI), returning NULL per the contract.
+  auto s = std::make_unique<et_session>();
   s->cbs = *cbs;
   s->ctx = ctx;
   s->host = cfg->host;
@@ -294,7 +319,6 @@ et_session *et_session_start(const et_config *cfg, const et_callbacks *cbs,
       buildInitialPayload(cfg->env_keys, cfg->env_vals, cfg->env_count);
   int p[2];
   if (pipe(p) != 0) {
-    delete s;
     return nullptr;
   }
   s->wake_r = p[0];
@@ -310,20 +334,37 @@ et_session *et_session_start(const et_config *cfg, const et_callbacks *cbs,
   // non-blocking.
   fcntl(s->wake_r, F_SETFL, O_NONBLOCK);
   s->transport.reset(new Transport(s->host, s->port, s->id, s->passkey));
-  registerLive(s);
-  s->thr = std::thread([s] { s->run(); });
-  return s;
+  // Register + spawn last. If the thread spawn throws (EAGAIN), the session is
+  // not yet registered, so unique_ptr cleanup here is race-free (no other
+  // thread can reach it). registerLive precedes the spawn so the started
+  // thread's handle is already claimable by et_close.
+  et_session *raw = s.get();
+  registerLive(raw);
+  try {
+    raw->thr = std::thread([raw] { raw->run(); });
+  } catch (...) {
+    claimForClose(raw);  // undo registerLive so the set stays consistent
+    throw;               // unique_ptr frees s (dtor closes fds); caught below
+  }
+  return s.release();  // ownership transfers to the caller's handle
+} catch (...) {
+  // No C++ exception may cross the extern "C" boundary. Bad config / OOM /
+  // resource exhaustion during setup -> fail safe with NULL, same as the
+  // documented bad-config contract.
+  return nullptr;
 }
 
 int et_session_send(et_session *s, const uint8_t *buf, size_t len) {
-  if (s->stopping.load()) return ET_ERR_CLOSED;
+  // Closed by the caller (stopping) OR self-terminated (ended): either way the
+  // transport thread is gone/going, so enqueuing would silently drop the bytes.
+  if (s->stopping.load() || s->ended.load()) return ET_ERR_CLOSED;
   s->enqueue(TerminalPacketType::TERMINAL_BUFFER, buildTerminalBuffer(buf, len));
   return (int)len;
 }
 
 int et_session_resize(et_session *s, uint16_t cols, uint16_t rows,
                       uint16_t width, uint16_t height) {
-  if (s->stopping.load()) return ET_ERR_CLOSED;
+  if (s->stopping.load() || s->ended.load()) return ET_ERR_CLOSED;
   s->enqueue(TerminalPacketType::TERMINAL_INFO,
              buildTerminalInfo(cols, rows, width, height));
   return 0;
@@ -336,7 +377,8 @@ void et_session_close(et_session *s) {
   s->wake();
   if (s->transport) s->transport->shutdown();
   if (s->thr.joinable()) s->thr.join();
-  if (s->wake_r >= 0) close(s->wake_r);
-  if (s->wake_w >= 0) close(s->wake_w);
+  // ~et_session (runs on delete) closes the self-pipe fds and scrubs the
+  // passkey; keep that cleanup in one place so the exception-unwind path in
+  // et_session_start frees the same resources.
   delete s;
 }

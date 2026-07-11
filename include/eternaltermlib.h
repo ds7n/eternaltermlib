@@ -59,7 +59,12 @@ typedef struct {
     void (*on_state)(void *ctx, et_state state);
 
     /* Terminal teardown (non-resumable). `reason` may be NULL. After on_end
-     * the handle is dead; call et_close to free it. */
+     * the handle is dead; call et_close to free it.
+     *
+     * SECURITY: `reason` can embed text supplied by the remote server (e.g.
+     * the handshake-rejection message). Treat it as UNTRUSTED — do not log it
+     * verbatim to a shared/structured log or render it as markup without
+     * sanitizing, or a hostile server could inject content into your logs/UI. */
     void (*on_end)(void *ctx, const char *reason);
 } et_callbacks;
 
