@@ -222,6 +222,13 @@ TEST(Integration, EmptySendIsAcceptedNoBytes) {
   ASSERT_NE(cl, nullptr);
   ASSERT_TRUE(h.waitState(ET_STATE_CONNECTED, std::chrono::seconds(10)));
   EXPECT_EQ(et_send(cl, (const uint8_t *)"", 0), 0);  // boundary: 0-length
+  // ...and the "NoBytes" half of the contract: a 0-length send must not cause
+  // any bytes to come back. Give a spurious echo a real chance to surface
+  // (waitBytes returns false only after the full grace window with <1 byte),
+  // then assert the received buffer is still EXACTLY empty. A regression that
+  // emitted stray bytes on an empty send would fail here.
+  EXPECT_FALSE(h.waitBytes(1, std::chrono::milliseconds(500)));
+  EXPECT_EQ(h.received(), "");
   et_close(cl);
 }
 
