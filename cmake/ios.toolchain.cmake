@@ -57,9 +57,26 @@ endif()
 # We build a static library only -- no code signing, no app bundle.
 set(CMAKE_MACOSX_BUNDLE OFF)
 
-# Standard cross-compile search-mode: find headers/libs in the SDK, run host
-# tools from the host.
+# Any -DCMAKE_PREFIX_PATH the caller passes (e.g. the iOS-built libsodium) also
+# becomes a find-root, so find_library(... sodium) under LIBRARY ONLY can locate
+# the target-arch lib there (CMAKE_PREFIX_PATH alone is not searched by the
+# ROOT_PATH ONLY modes).
+if(CMAKE_PREFIX_PATH)
+  list(APPEND CMAKE_FIND_ROOT_PATH ${CMAKE_PREFIX_PATH})
+endif()
+
+# Cross-compile search modes:
+#  - PROGRAM BOTH  : host tools (protoc for codegen) resolve on the host.
+#  - LIBRARY ONLY  : target link libs (libsodium, protobuf-lite runtime) come
+#                    from the iOS SDK / provided prefix, never the host.
+#  - INCLUDE ONLY  : target headers from the SDK/prefix.
+#  - PACKAGE BOTH  : find_package() may resolve host-installed packages. This
+#                    is required because CMakeLists.txt calls
+#                    find_package(Protobuf REQUIRED) for the HOST protoc +
+#                    codegen wiring; with PACKAGE ONLY that host Protobuf is
+#                    invisible and configure fails. The iOS-target protobuf-lite
+#                    runtime is still linked via LIBRARY ONLY, not this.
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM BOTH)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)

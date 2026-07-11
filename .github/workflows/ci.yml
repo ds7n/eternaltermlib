@@ -25,7 +25,7 @@ jobs:
     name: Unit tests (fixture-free)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive   # ET + its nested external/* deps
 
@@ -44,7 +44,7 @@ jobs:
     name: Integration + roaming (live etserver)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -76,7 +76,7 @@ jobs:
       matrix:
         san: [ON, thread]   # ON = ASan+UBSan, thread = TSan
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
