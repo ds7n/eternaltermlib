@@ -8,15 +8,25 @@
 FROM ubuntu:24.04
 
 # Toolchain: clang + clangd (LSP), cmake/ninja (build), plus ET's transport deps
-# (libsodium = secretbox crypto; protobuf-lite = wire messages). git for the
-# submodule; pkg-config for dep discovery.
+# (libsodium = secretbox crypto; protobuf-lite = wire messages; libssl/zlib =
+# pulled in transitively by ET's vendored cpp-httplib, built with
+# CPPHTTPLIB_OPENSSL_SUPPORT unconditionally enabled in Headers.hpp). git for
+# the submodule; pkg-config for dep discovery.
+#
+# libclang-rt-18-dev supplies the static sanitizer runtimes
+# (libclang_rt.{asan,tsan,ubsan}-x86_64.a) that Ubuntu's `clang` package does
+# NOT bundle. Without it, a `-fsanitize=address`/`thread` link fails with
+# `libclang_rt.asan-x86_64.a: No such file or directory` (Task 4). The version
+# suffix MUST match `clang` (18.x on 24.04); bump both together on a base image
+# change. Required for the ET_SANITIZE build option (Task 8).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates git pkg-config \
-        clang clangd clang-format \
+        clang clangd clang-format libclang-rt-18-dev llvm-18 \
         cmake ninja-build \
         libsodium-dev \
         protobuf-compiler libprotobuf-dev \
+        libssl-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

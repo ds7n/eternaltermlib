@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stand-in "login shell" for the byte-round-trip integration test.
+# ET's terminal child execs $SHELL as `execl($SHELL, $SHELL, "-l", NULL)`
+# (see extern/eternalterminal/src/terminal/PseudoUserTerminal.hpp,
+# runTerminal()) -- i.e. it always appends a `-l` argument. `cat` has no
+# such flag and would exit immediately with "invalid option -- 'l'" if
+# pointed to directly via SHELL=/bin/cat, closing the session before any
+# byte round-trips. This wrapper ignores its argv entirely and execs `cat`,
+# so the PTY session becomes a plain echo loop: bytes written by
+# TERMINAL_BUFFER come out the PTY unchanged via `cat`'s stdin->stdout copy.
+exec /bin/cat

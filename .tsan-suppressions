@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# ThreadSanitizer race suppressions for eternaltermlib's -DET_SANITIZE=thread
+# build (Task 8). Point TSan at this file via:
+#   TSAN_OPTIONS="suppressions=/work/.tsan-suppressions"
+# (the test CMake wires this automatically via the ET_TSAN_SUPPRESSIONS env on
+# each add_test).
+#
+# SCOPE RULE: every entry below is a race whose BOTH racing accesses live
+# entirely inside VENDORED upstream Eternal Terminal (extern/eternalterminal/),
+# which this repo may not modify (see CLAUDE.md "do NOT modify extern/"). No
+# first-party file (src/session.cpp, src/transport.cpp) is suppressed — a race
+# reported *there* is ours and must be fixed, not muted. Verified: the only
+# first-party race TSan found (the et_close heap-use-after-free on the
+# CloseIsIdempotent path) was FIXED in src/session.cpp (external live-handle
+# registry), not suppressed.
+#
+# ROOT CAUSE (all four below are the same upstream defect): ET's
+# Connection::socketFd is written under connectionMutex by closeSocket() /
+# closeSocketAndMaybeReconnect() / recover(), but read WITHOUT the mutex by the
+# inline Connection::getSocketFd() (Connection.hpp:50) and BackedWriter's
+# sequence-number path. Our transport thread reads the fd each loop iteration
+# (the documented ET usage, mirroring upstream TerminalClient) while the close
+# path / ET's own reconnect thread mutate it. The read is benign in practice
+# (an int load that at worst yields a momentarily-stale fd, re-checked next
+# 10ms select tick), but it is a genuine unsynchronized access in upstream code
+# we cannot patch here. Reported upstream-relevant; suppressed to keep OUR
+# threading model's TSan signal clean.
+
+# getSocketFd(): unsynchronized read of Connection::socketFd (Connection.hpp:50).
+race:et::Connection::getSocketFd
+
+# closeSocket(): writes socketFd under the lock, racing the unlocked read above.
+race:et::Connection::closeSocket
+
+# recover()/reconnect path: ET's own reconnect thread rewrites writer/fd state
+# racing the transport thread's writePacket (Connection.cpp / BackedWriter.cpp).
+race:et::Connection::recover
+race:et::BackedWriter::write

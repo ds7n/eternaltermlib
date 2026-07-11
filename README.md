@@ -31,23 +31,58 @@ eternaltermlib (this repo, portable C)  ──vendored+linked──▶  libetios
 
 `libetios` (which lives in the semicolyn repo, like `extern/mosh`) is the only iOS-specific layer: it adapts this C ABI to Swift + the app lifecycle and packages an xcframework.
 
-## C ABI (sketch — see `include/eternaltermlib.h`)
+## C ABI (see `include/eternaltermlib.h` for the full, documented surface)
+
+Connection parameters go through a growable `et_config` struct; the three callbacks (`on_bytes`/`on_state`/`on_end`) all fire on the library's internal transport thread.
 
 ```c
-et_client *et_connect(const char *host, uint16_t port,
-                      const char *id, const char *passkey,
-                      const et_callbacks *cbs, void *ctx);  // callbacks: on_bytes/on_state/on_end
-int  et_send(et_client *c, const uint8_t *buf, size_t len);
-void et_close(et_client *c);
+#include "eternaltermlib.h"
+#include <string.h>
+
+static void on_bytes(void *ctx, const uint8_t *buf, size_t len) {
+    /* Decrypted shell output. `buf` is valid ONLY for this call — copy if kept. */
+    fwrite(buf, 1, len, stdout);
+}
+static void on_state(void *ctx, et_state st)      { /* CONNECTING/CONNECTED/ROAMING/DISCONNECTED */ }
+static void on_end(void *ctx, const char *reason) { /* session over (reason may be NULL); call et_close */ }
+
+int main(void) {
+    /* InitialPayload env map — parallel key/value arrays; include "TERM". */
+    const char *keys[] = { "TERM" };
+    const char *vals[] = { "xterm-256color" };
+
+    et_config cfg = {0};
+    cfg.host      = "host.example";
+    cfg.port      = 2022;                 /* 0 -> default 2022 */
+    cfg.id        = "0123456789abcdef";   /* already-planted bootstrap id */
+    cfg.passkey   = "0123456789abcdef0123456789abcdef";
+    cfg.env_keys  = keys;
+    cfg.env_vals  = vals;
+    cfg.env_count = 1;
+    cfg.cols = 80; cfg.rows = 24;         /* initial window, char cells */
+
+    et_callbacks cbs = { on_bytes, on_state, on_end };
+
+    et_client *c = et_connect(&cfg, &cbs, /*ctx=*/NULL);   /* NULL only on bad args */
+    if (!c) return 1;
+
+    const char cmd[] = "ls -la\n";
+    et_send(c, (const uint8_t *)cmd, strlen(cmd));         /* keystrokes -> TERMINAL_BUFFER */
+    et_set_window_size(c, 120, 40, 0, 0);                  /* resize -> TERMINAL_INFO */
+
+    /* ... run until on_end / app teardown ... */
+    et_close(c);                          /* joins the transport thread, frees; idempotent */
+    return 0;
+}
 ```
 
-Callback-based (not blocking `read`/`write`) so no consumer owns a read loop, and the same ABI works identically on Linux (CI test harness) and iOS.
+Callback-based (not blocking `read`/`write`) so no consumer owns a read loop, and the same ABI works identically on Linux (CI test harness) and iOS. `cfg` strings are deep-copied, so the caller may free them once `et_connect` returns.
 
 ## Build & test
 
 Builds with CMake against **libsodium** + **protobuf-lite** (both cross-compile to iOS/Android). Tested on Linux CI against a real `etserver` fixture (Docker Compose), including a **roaming/reconnect-replay** test (drop the fd mid-stream, reconnect, assert the backed buffer replays exactly the missed bytes).
 
-> Status: **scaffolding.** Design doc in `docs/specs/`; implementation not yet started.
+> Status: **implemented.** The full C ABI (`et_connect`/`et_send`/`et_set_window_size`/`et_close` + `on_bytes`/`on_state`/`on_end`) is in place and integration-tested on Linux CI against a real `etserver` fixture — including the roaming/reconnect-replay crown-jewel test (sever the link mid-stream via toxiproxy, reconnect, assert the backed buffer replays **exactly** the missed bytes). The suite additionally runs clean under ThreadSanitizer (transport thread + send queue + self-pipe) and AddressSanitizer+UBSan (`et_close` frees cleanly, idempotent double-close is memory-safe). Build/test in the `eternaltermlib-dev` Docker image; see `docs/specs/`.
 
 ## License gate before shipping
 

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Real etserver + etterminal fixture for integration tests, built from the
+# vendored ET submodule so the fixture matches our pinned PROTOCOL_VERSION
+# (currently 6; see extern/eternalterminal/src/base/Headers.hpp). Only
+# src/terminal's server/terminal binaries are needed here -- unlike our own
+# shim (which links src/base only), this container runs the REAL etserver.
+FROM ubuntu:24.04
+# libssl-dev/zlib1g-dev: ET's vendored cpp-httplib builds with
+# CPPHTTPLIB_OPENSSL_SUPPORT unconditionally (see our own Dockerfile.dev),
+# so linking etserver/etterminal needs OpenSSL + zlib too.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git ca-certificates pkg-config \
+    libsodium-dev libprotobuf-dev protobuf-compiler libgflags-dev \
+    libutempter-dev libssl-dev zlib1g-dev netcat-openbsd \
+ && rm -rf /var/lib/apt/lists/*
+COPY extern/eternalterminal /src/et
+WORKDIR /src/et
+# DISABLE_VCPKG: ET's default CMakeLists.txt bootstraps vcpkg (network fetch,
+# and it doesn't play well in a plain Docker build); the vendored
+# external/{cxxopts,cpp-httplib,json,Catch2,...} submodules are already
+# populated in the checkout, so build against those directly instead.
+# DISABLE_SENTRY/DISABLE_TELEMETRY: no crash-reporting network calls needed
+# for a test fixture. BUILD_TESTING=OFF: skip ET's own unit tests, we only
+# need the two binaries.
+RUN cmake -B build -G Ninja -DDISABLE_CRASH_LOG=ON -DDISABLE_VCPKG=ON \
+      -DDISABLE_SENTRY=ON -DDISABLE_TELEMETRY=ON -DBUILD_TESTING=OFF \
+ && cmake --build build --target etserver etterminal
+COPY test/fixture/plant_credential.sh /usr/local/bin/plant_credential.sh
+COPY test/fixture/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY test/fixture/et-cat-shell /usr/local/bin/et-cat-shell
+# Task 7 shell variants: SIGWINCH-echo (window test) + exit-immediately
+# (lifecycle test). Same $SHELL-wrapper trick as et-cat-shell (ignore the
+# appended `-l` argv). The roaming test reuses et-cat-shell through the proxy.
+COPY test/fixture/et-resize-echo-shell /usr/local/bin/et-resize-echo-shell
+COPY test/fixture/et-exit0-shell /usr/local/bin/et-exit0-shell
+# Raw-mode cat echo for the roaming/replay crown-jewel (byte-exact echo path).
+COPY test/fixture/et-cat-raw-shell /usr/local/bin/et-cat-raw-shell
+RUN chmod +x /usr/local/bin/plant_credential.sh /usr/local/bin/entrypoint.sh \
+      /usr/local/bin/et-cat-shell /usr/local/bin/et-resize-echo-shell \
+      /usr/local/bin/et-exit0-shell /usr/local/bin/et-cat-raw-shell
+EXPOSE 2022
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

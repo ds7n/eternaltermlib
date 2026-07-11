@@ -1,0 +1,40 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stand-in "login shell" for the window-size integration test
+# (WindowSizePropagatesToRemotePty). Like et-cat-shell, ET execs $SHELL as
+# `execl($SHELL, $SHELL, "-l", NULL)` (PseudoUserTerminal.hpp, runTerminal),
+# so this wrapper ignores its argv (the appended `-l`) entirely.
+#
+# ET applies a client TERMINAL_INFO (our et_set_window_size) to the PTY master
+# via ioctl(TIOCSWINSZ) (PseudoUserTerminal::setInfo). The test asserts the
+# remote PTY saw the EXACT geometry the client pushed by having this shell echo
+# the PTY's current size as "<rows> <cols>" (matching `stty size` order).
+#
+# We POLL the winsize every 200ms and emit it whenever it CHANGES, rather than
+# relying solely on a SIGWINCH trap. Polling is deterministic and race-free:
+# it does not depend on the trap firing at exactly the right moment relative to
+# when ET applies the ioctl, and it is immune to bash's own SIGWINCH handling.
+# It also emits the initial geometry once at startup so the test can confirm
+# the echo path is live before the resize. A wrong/dropped resize therefore
+# fails the exact-substring assertion ("40 120"), not a loose check.
+#
+# `set -euo pipefail` is intentionally omitted: this is a long-lived poll loop
+# where transient non-zero returns (e.g. a racing `stty` read) are expected
+# control flow, and `-e` would abort the loop on the first one.
+
+emit_size() {
+  # `stty size` prints "<rows> <cols>" for the controlling tty (stdin).
+  stty size 2>/dev/null
+}
+
+last=""
+while true; do
+  cur="$(emit_size)"
+  if [ -n "$cur" ] && [ "$cur" != "$last" ]; then
+    printf '%s\n' "$cur"
+    last="$cur"
+  fi
+  sleep 0.2
+done

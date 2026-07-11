@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stand-in "login shell" for the lifecycle integration test
+# (RemoteShellExitTriggersOnEnd). Like et-cat-shell, ET execs $SHELL as
+# `execl($SHELL, $SHELL, "-l", NULL)` (PseudoUserTerminal.hpp, runTerminal),
+# so this wrapper ignores its argv (the appended `-l`) entirely.
+#
+# It exits IMMEDIATELY (exit 0): the remote PTY child terminates, ET's
+# UserTerminalHandler sees the shell die and tears the session down, and our
+# client observes the terminal close -> on_end + ET_STATE_DISCONNECTED. Used
+# to prove the remote-exit -> on_end lifecycle path (and, after it, et_close
+# idempotency/null-safety).
+exit 0

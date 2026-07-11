@@ -1,0 +1,29 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 True Positive LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stand-in "login shell" for the roaming/replay crown-jewel test
+# (test_roaming.cpp). Like et-cat-shell, ET execs $SHELL as
+# `execl($SHELL, $SHELL, "-l", NULL)` (PseudoUserTerminal.hpp, runTerminal),
+# so this wrapper ignores its argv (the appended `-l`) entirely.
+#
+# Difference from et-cat-shell: the PTY is switched to RAW mode with echo OFF
+# before `cat` runs (`stty raw -echo`). The plain et-cat-shell leaves the tty
+# in canonical mode, where the kernel line discipline (a) echoes input itself
+# and (b) translates a trailing '\n' to "\r\n" on echo/output -- fine for the
+# small single-line round-trip test, but it would make the roaming test's EXACT
+# -bytes assertion (received() == expected, byte-for-byte) impossible to state
+# cleanly: canonical mode both duplicates (tty echo + cat) and mutates
+# ('\n'->'\r\n') the stream. Raw + -echo makes `cat` the SOLE, VERBATIM echo
+# path: every byte we send comes back exactly once, unchanged, in order.
+#
+# READY sentinel: raw mode is applied asynchronously at shell startup, so bytes
+# the client sends before `stty raw` completes would be echoed in the WRONG
+# (canonical, '\r\n') mode -- a startup race. To make the test deterministic,
+# after switching to raw mode we emit a fixed "__RAW_READY__\n" marker. The
+# test waits for that marker before sending any payload, guaranteeing every
+# payload byte is echoed under raw mode. (The marker is a distinct, known
+# prefix the test strips, so it never pollutes the exact-bytes comparison.)
+stty raw -echo
+printf '__RAW_READY__\n'
+exec /bin/cat

@@ -5,9 +5,17 @@
 #   docker compose build dev
 #   docker compose run --rm dev cmake -B build && docker compose run --rm dev cmake --build build
 #   docker compose run --rm dev ctest --test-dir build     # once tests exist
-# The `etserver` fixture (added with the test suite) lets the reconnect/roaming
-# tests run against a REAL Eternal Terminal server, mirroring semicolyn's
-# sshd/sshd-legacy fixtures.
+#
+# The `etserver` fixture lets the reconnect/roaming tests run against a REAL
+# Eternal Terminal server, mirroring semicolyn's sshd/sshd-legacy fixtures.
+# It sits behind the `integration` Compose profile so plain unit-test runs
+# (Tasks 1-4's `ctest` loop above) never build/start it. For integration runs
+# (Tasks 6/7), bring the fixture up first, then run tests against it:
+#   docker compose --profile integration up -d etserver
+#   HOST_UID=$(id -u) HOST_GID=$(id -g) \
+#     docker compose --profile integration run --rm dev-integration \
+#     ctest --test-dir build --output-on-failure
+#   docker compose --profile integration down
 services:
   dev:
     build:
@@ -20,19 +28,110 @@ services:
     working_dir: /work
     volumes:
       - .:/work
+    # ThreadSanitizer (Task 8's `-DET_SANITIZE=thread` build) must disable ASLR
+    # at startup via personality(ADDR_NO_RANDOMIZE); Docker's default seccomp
+    # profile blocks that syscall, making every TSan binary abort with
+    # `tsan_platform_linux.cpp:282 CHECK failed ... personality(...)`. Granting
+    # SYS_PTRACE + an unconfined seccomp profile lets TSan set its fixed memory
+    # layout. Harmless for non-sanitized/ASan runs. See:
+    # https://github.com/google/sanitizers/issues/1614
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
 
-  # Eternal Terminal server fixture for integration tests. STUB — wired up with
-  # the test suite: builds etserver + etterminal from the vendored submodule (or
-  # an upstream image), plants a known id/passkey, exposes port 2022 so the
-  # dev container can exercise connect / stream / reconnect-replay.
-  # etserver:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.etserver
-  #   image: eternaltermlib-etserver
-  #   healthcheck:
-  #     test: ["CMD", "nc", "-z", "127.0.0.1", "2022"]
-  #     interval: 1s
-  #     timeout: 3s
-  #     retries: 30
-  #     start_period: 2s
+  # Same image as `dev`, but only for integration runs: depends on `etserver`
+  # being healthy (i.e. listening AND credential-planted, see below) before
+  # running. Kept as a separate service (rather than on the base `dev`) so a
+  # plain unit `ctest` run never pays the etserver build/start cost.
+  dev-integration:
+    extends: dev
+    profiles: ["integration"]
+    depends_on:
+      etserver:
+        condition: service_healthy
+      # The roaming/replay test connects THROUGH toxiproxy (host=toxiproxy:2022)
+      # and drives its control API (toxiproxy:8474) to sever/restore the link.
+      # Wait for it to be healthy so the test never races a not-yet-listening
+      # control API.
+      toxiproxy:
+        condition: service_healthy
+
+  # Eternal Terminal server fixture for integration tests. Builds a REAL
+  # etserver + etterminal from the vendored submodule (matching our pinned
+  # PROTOCOL_VERSION), plants a known id/passkey ONCE at container start (see
+  # test/fixture/plant_credential.sh for the upstream-source-backed evidence
+  # that registration is durable for the container's lifetime -- no re-plant
+  # needed between test connections), and exposes port 2022 so the dev
+  # container can exercise connect / stream / reconnect-replay. Behind the
+  # `integration` profile: `docker compose up`/plain `run dev` never starts
+  # this service.
+  etserver:
+    profiles: ["integration"]
+    build:
+      context: .
+      dockerfile: test/fixture/Dockerfile.etserver
+    image: eternaltermlib-etserver
+    environment:
+      ET_ID: "0123456789abcdef"
+      ET_PASSKEY: "0123456789abcdef0123456789abcdef"
+      # Task 6: one dedicated `cat`-echo credential (SHELL overridden to the
+      # et-cat-shell wrapper only for these plants, see plant_credential.sh)
+      # PER integration test that performs a real et_connect -- an id must
+      # NEVER be reused across two independent connects (ET treats a second
+      # connect for an already-used id as roaming *recovery*, not a fresh
+      # session; see plant_credential.sh's lifecycle-correction comment for
+      # the FATAL/desync this caused when first tried with a single shared
+      # cat-shell id). The primary ET_ID/ET_PASSKEY session above is
+      # untouched -- it still runs the container's default login shell.
+      ET_CAT_IDS: "fedcba9876543210 fedcba9876543211 fedcba9876543212"
+      ET_CAT_PASSKEYS: "fedcba9876543210fedcba9876543210 fedcba9876543211fedcba9876543211 fedcba9876543212fedcba9876543212"
+      # Task 7 dedicated ids: window (SIGWINCH-echo shell), lifecycle
+      # (exit-immediately shell), and the roaming/replay crown-jewel (cat-echo
+      # shell reached through toxiproxy; reuses its single id across the
+      # sever/restore, which is ET's intended roaming *recovery* path). Each is
+      # its own never-reused id per the lifecycle rule above.
+      ET_RESIZE_ID: "abcdef0123456780"
+      ET_RESIZE_PASSKEY: "abcdef0123456780abcdef0123456780"
+      ET_EXIT0_ID: "abcdef0123456781"
+      ET_EXIT0_PASSKEY: "abcdef0123456781abcdef0123456781"
+      ET_ROAM_ID: "abcdef0123456782"
+      ET_ROAM_PASSKEY: "abcdef0123456782abcdef0123456782"
+    # (healthy) must mean "listening AND credentials planted", not just
+    # "listening" -- otherwise a consumer gating on service_healthy (the
+    # dev-integration depends_on above) can race a connect against an
+    # unplanted credential and see an intermittent INVALID_KEY. The sentinel
+    # file is (re-)touched by plant_credential.sh (see that script) after
+    # the primary plant AND after the LAST of the cat-echo plants (its final
+    # statement), so (healthy) is only reported once every id/passkey pair
+    # above (primary + all three cat-echo sessions) is registered.
+    healthcheck:
+      test: ["CMD", "sh", "-c", "[ -f /tmp/.et-credential-planted ] && nc -z 127.0.0.1 2022"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+
+  # Breakable TCP relay for the roaming/replay crown-jewel test. toxiproxy is
+  # purpose-built for injecting a hard connection cut: the roaming test creates
+  # a proxy `et` (toxiproxy:2022 -> etserver:2022) via the control API on
+  # :8474, streams through it, then disables the proxy mid-stream to SEVER the
+  # link (dropping the live connection so our client's socket dies -> ET
+  # roaming), and re-enables it so ET's reconnect thread re-establishes and
+  # replays the backed buffer. See test/proxy_control.hpp (pause()/resume()).
+  # Same `integration` profile so a plain unit run never starts it.
+  toxiproxy:
+    profiles: ["integration"]
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    # Bind the control API to all interfaces so dev-integration can drive it.
+    command: ["-host", "0.0.0.0"]
+    # `docker inspect`-free healthcheck: the image ships a `toxiproxy-cli` that
+    # talks to the local API -- `list` succeeds only once the API is up. This
+    # gates dev-integration's depends_on so the test never races a not-yet-ready
+    # control API.
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 1s
