@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 # eternaltermlib
 
 [![ci](https://github.com/ds7n/eternaltermlib/actions/workflows/ci.yml/badge.svg)](https://github.com/ds7n/eternaltermlib/actions/workflows/ci.yml)
-[![ios-cross](https://github.com/ds7n/eternaltermlib/actions/workflows/ios-cross.yml/badge.svg)](https://github.com/ds7n/eternaltermlib/actions/workflows/ios-cross.yml)
 
 A portable C client library for the [Eternal Terminal](https://github.com/MisterTea/EternalTerminal) (ET) transport: its re-connectable, roaming-tolerant encrypted byte stream, behind a small `extern "C"` callback API. No PTY, no terminal, no platform assumptions.
 

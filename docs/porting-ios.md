@@ -3,94 +3,77 @@ SPDX-FileCopyrightText: 2026 True Positive LLC
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Porting eternaltermlib to iOS (for semicolyn)
+# Building eternaltermlib for iOS (guidance for consumers)
 
-Status of the iOS cross-compile, what is proven on Linux, and the remaining
-work that needs a macOS host. Per the layering in the README, semicolyn
-**vendors this repo as source and compiles it in its own iOS build** (like
-`extern/mosh`); this repo produces a portable C core + a CMake target, not a
-prebuilt iOS artifact. The Swift wrapper (`libetios`) lives in semicolyn.
+eternaltermlib is a **portable C library**. It does not build an iOS artifact
+itself: a consumer vendors it as source and compiles it inside its own iOS
+build (the [semicolyn](https://github.com/ds7n/semicolyn) app does this, like
+`extern/mosh`). This repo's job is to be correct and portable; the iOS
+packaging belongs to the consumer that already owns an iOS toolchain.
 
-## What is DONE and verified (on Linux)
+This doc captures what a consumer needs to build it for iOS, including the
+findings that make it work.
 
-### The OpenSSL blocker is removed — `-DET_HTTP_TLS=OFF`
+## The one thing that makes iOS viable: drop OpenSSL
 
-The base transport pulled in OpenSSL + zlib only because ET's `Headers.hpp`
-includes `cpp-httplib` with TLS support. **The transport never calls any
-`httplib::` symbol** (zero use sites in the base `.cpp` we compile) — it was
-pure dead weight, and OpenSSL is the one dependency that is genuinely painful to
-cross-compile for iOS.
+Configure with **`-DET_HTTP_TLS=OFF`**. ET's `Headers.hpp` pulls in cpp-httplib
+with TLS support, which drags in OpenSSL + zlib, and OpenSSL is the one
+dependency that is painful to cross-compile for iOS. The transport never calls
+cpp-httplib, so `ET_HTTP_TLS=OFF` suppresses the whole header (no vendored
+edit) and drops OpenSSL + zlib.
 
-`ET_HTTP_TLS` (CMake option, default `ON` to preserve the Linux build) controls
-this:
+Verified on Linux: with `-DET_HTTP_TLS=OFF` the full library + tests build and
+link with zero OpenSSL symbols, and the real transport (handshake, streaming,
+roaming/replay) works. The only remaining link deps are **libsodium** and
+**protobuf-lite**, both of which cross-compile to iOS.
 
-- `ON`  — link OpenSSL/zlib (historical Linux behavior).
-- `OFF` — suppress `httplib.h` entirely (by pre-defining its include guard
-  `CPPHTTPLIB_HTTPLIB_H`, so the `#include` becomes a no-op — **no vendored
-  edit**), dropping OpenSSL + zlib. This is the mobile config.
+## Remaining link deps for the iOS target
 
-> Why not `CPPHTTPLIB_OPENSSL_SUPPORT=0`? httplib gates its SSL code with
-> `#ifdef` (defined-ness, not value) and `Headers.hpp` force-`#define`s it, so
-> `=0` still emits the SSL code. Suppressing the whole header is the clean lever.
+- **libsodium** for iOS. libsodium ships `dist-build/apple-xcframework.sh`
+  (its only iOS build path; it builds all Apple slices and is slow, so cache
+  it). Note it produces an `.xcframework`, not a plain `lib/`+`include/` prefix
+  that `find_library(sodium)` expects, so you either point the build at the
+  extracted per-arch static lib inside the xcframework, or reuse an
+  iOS-libsodium your app already builds.
+- **protobuf-lite** for iOS. There is no official iOS build script; established
+  community build scripts exist (search "protobuf iOS static library"). The
+  `protoc` compiler runs on the **host** (for codegen), only the protobuf-lite
+  *runtime* needs the iOS target build.
 
-**Verified with `-DET_HTTP_TLS=OFF` on Linux:**
-- Full library + tests compile and link with **zero OpenSSL symbols**
-  (`nm -u libeternaltermlib.a | grep SSL_` is empty).
-- **Unit suite 3/3** and **integration + roaming 2/2** pass — the real ET
-  handshake, streaming, and roaming/replay all work without httplib/OpenSSL.
+## CMake toolchain: use a mature one, do not hand-roll
 
-So the remaining link-time deps for the mobile config are **libsodium** +
-**protobuf-lite** only — both of which cross-compile to iOS/Android.
+Use **[leetal/ios-cmake](https://github.com/leetal/ios-cmake)** (a widely-used
+iOS CMake toolchain). It supports the platform values this project needs
+(`OS64` device arm64, `SIMULATORARM64`, and `OS64COMBINED` for a device+sim FAT
+library) and handles the `find_library` / simulator-vs-device switching that a
+hand-rolled toolchain gets wrong. Point `CMAKE_TOOLCHAIN_FILE` at it.
 
-### An iOS CMake toolchain file exists
+Two settings a consumer's toolchain must get right (learned the hard way):
 
-`cmake/ios.toolchain.cmake` — a lean toolchain for `iOS` / `iOS Simulator`
-(device arm64, sim arm64, sim x86_64). Committed so a macOS runner can use it;
-it cannot be exercised on Linux.
+- **`CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH`** (not `ONLY`). This project calls
+  `find_package(Protobuf REQUIRED)` for the **host** protoc + codegen wiring;
+  `ONLY` restricts package search to the iOS SDK and configure fails because
+  the host Protobuf is invisible. `BOTH` lets host packages resolve while
+  target link libs still come from the SDK/prefix (`LIBRARY`/`INCLUDE ONLY`).
+- Make the iOS-built libsodium/protobuf prefixes searchable by the `ONLY`
+  library mode (append them to `CMAKE_FIND_ROOT_PATH`, not just
+  `CMAKE_PREFIX_PATH`).
 
-## What REMAINS (needs a macOS host with Xcode — no Mac available in this repo's CI yet)
+## Sketch
 
-1. **Actually run the iOS cross-compile.** On macOS:
-   ```sh
-   cmake -B build-ios -G Ninja \
-     -DCMAKE_TOOLCHAIN_FILE=cmake/ios.toolchain.cmake \
-     -DIOS_PLATFORM=OS64 \
-     -DET_HTTP_TLS=OFF \
-     -DCMAKE_PREFIX_PATH="<path to iOS-built libsodium & protobuf>"
-   cmake --build build-ios
-   ```
-   This will surface any remaining POSIX assumptions in ET's `src/base` that
-   don't hold on iOS (it targets Linux/macOS/Windows; iOS is close to macOS but
-   sandboxed — watch for `fork`/PTY/filesystem calls, though the transport
-   subset we compile should be clean).
+```sh
+cmake -B build-ios -G Xcode \
+  -DCMAKE_TOOLCHAIN_FILE=<path>/leetal-ios.toolchain.cmake \
+  -DPLATFORM=OS64COMBINED \
+  -DET_HTTP_TLS=OFF \
+  -DCMAKE_PREFIX_PATH="<iOS libsodium>;<iOS protobuf-lite>"
+cmake --build build-ios --config Release
+```
 
-2. **iOS-built libsodium + protobuf-lite.** Provide these for the target arch
-   (e.g. via a package manager that supports iOS, a prebuilt, or building them
-   with the same toolchain). protobuf-lite is the runtime we link; the `protoc`
-   compiler still runs on the **host**, not the target.
+## Building it in CI without a Mac
 
-3. **A consumable artifact / install target.** Currently `eternaltermlib` is an
-   in-tree `STATIC` target with no `install()`/`export()`. Decide the contract
-   semicolyn uses: either it `add_subdirectory()`s this repo directly (simplest,
-   matches the mosh pattern), or we add an install/export + optionally bundle an
-   `.xcframework` (device + sim slices) in a macOS CI job.
-
-4. **macOS CI to keep it green.** A GitHub Actions `macos-latest` job
-   (free for public repos) running step 1 for each platform slice — so the iOS
-   cross-compile is enforced, not a one-time check. This is the payoff of making
-   the repo public: free Apple runners.
-
-## Summary
-
-| Piece | Status |
-|---|---|
-| Drop OpenSSL (the hard iOS dep) | ✅ done, verified on Linux (`-DET_HTTP_TLS=OFF`) |
-| iOS toolchain file | ✅ committed (`cmake/ios.toolchain.cmake`) |
-| Run the arm64-apple-ios build | ⏳ needs macOS + Xcode |
-| iOS-built libsodium/protobuf | ⏳ needs macOS |
-| Install/export / xcframework | ⏳ decide contract with semicolyn |
-| macOS CI gate | ⏳ set up when repo goes public (free runners) |
-
-The Linux-side blocker (OpenSSL) is retired; the rest is macOS-host work that
-this environment cannot perform, staged and documented so it can be picked up on
-a Mac or a macOS CI runner.
+If the consumer (like semicolyn) has no Mac and relies on GitHub Actions
+`macos-latest` runners, see the companion CI recipe handed off separately: it
+encodes the toolchain choice, the dep sourcing, and the `PACKAGE BOTH` fix so
+the iOS build can be developed in CI without burning many blind ~20-minute
+iterations.
