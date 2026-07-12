@@ -32,6 +32,26 @@ void et_close(et_client *c);   /* joins the transport thread, frees; idempotent 
 
 `et_config` carries host/port, the planted `id`/`passkey`, an env map (include `TERM`), and the initial window. Config strings are deep-copied, so the caller may free them once `et_connect` returns.
 
+## Consuming
+
+Two ways to link it:
+
+**Vendor as source** (recommended; how semicolyn embeds it, like `extern/mosh`). Add this repo as a submodule and `add_subdirectory` it:
+
+```cmake
+add_subdirectory(extern/eternaltermlib)
+target_link_libraries(yourapp PRIVATE eternaltermlib)
+```
+
+**Install + `find_package`.** After `cmake --install`, consume the exported target:
+
+```cmake
+find_package(eternaltermlib REQUIRED)
+target_link_libraries(yourapp PRIVATE eternaltermlib::eternaltermlib)
+```
+
+For iOS/mobile, add `-DET_HTTP_TLS=OFF` to drop OpenSSL (see [`docs/porting-ios.md`](docs/porting-ios.md)).
+
 ## Build & test
 
 CMake against **libsodium** + **protobuf-lite**. Build and test in the `eternaltermlib-dev` Docker image:

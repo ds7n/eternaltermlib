@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 True Positive LLC
 # SPDX-License-Identifier: Apache-2.0
 #
-# eternaltermlib — portable C client library for the Eternal Terminal transport.
+# eternaltermlib: portable C client library for the Eternal Terminal transport.
 
 cmake_minimum_required(VERSION 3.16)
 project(eternaltermlib VERSION 0.0.1 LANGUAGES C CXX)
@@ -10,6 +10,8 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+include(GNUInstallDirs)  # CMAKE_INSTALL_INCLUDEDIR/LIBDIR, used below + at install
 
 # --- Sanitizer build option ------------------------------------------------
 # -DET_SANITIZE=thread          -> ThreadSanitizer (validates the transport
@@ -80,19 +82,23 @@ set(ET_BASE_SRCS
 )
 
 add_library(et_base STATIC ${ET_BASE_SRCS} ${ET_PB_SRCS})
+# These are ET-internal build-tree includes; a consumer of the installed lib
+# never sees them (only include/eternaltermlib.h). Wrap in BUILD_INTERFACE so
+# they apply while WE compile but are NOT exported to the install tree (an
+# exported absolute build path fails install(EXPORT)).
 target_include_directories(et_base PUBLIC
-    ${ET_BASE}
-    ${ET_DIR}/src
-    ${ET_EXTERNAL}/easyloggingpp/src
-    ${ET_EXTERNAL}/PlatformFolders
-    ${ET_EXTERNAL}/UniversalStacktrace/ust
-    ${ET_EXTERNAL}/json/single_include
-    ${ET_EXTERNAL}/base64
-    ${ET_EXTERNAL}/cpp-httplib
-    ${ET_EXTERNAL}/ThreadPool
-    ${ET_EXTERNAL}/sole
-    ${CMAKE_CURRENT_BINARY_DIR}          # generated *.pb.h
-    ${Protobuf_INCLUDE_DIRS}
+    $<BUILD_INTERFACE:${ET_BASE}>
+    $<BUILD_INTERFACE:${ET_DIR}/src>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/easyloggingpp/src>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/PlatformFolders>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/UniversalStacktrace/ust>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/json/single_include>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/base64>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/cpp-httplib>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/ThreadPool>
+    $<BUILD_INTERFACE:${ET_EXTERNAL}/sole>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>   # generated *.pb.h
+    $<BUILD_INTERFACE:${Protobuf_INCLUDE_DIRS}>
 )
 # ELPP flags ET's own base compiles with (from ET CMakeLists.txt).
 target_compile_definitions(et_base PUBLIC
@@ -115,7 +121,11 @@ endif()
 
 # --- Public library --------------------------------------------------------
 add_library(eternaltermlib STATIC src/shim.cpp src/transport.cpp src/session.cpp)
-target_include_directories(eternaltermlib PUBLIC include PRIVATE src)
+target_include_directories(eternaltermlib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE src)
 target_link_libraries(eternaltermlib PRIVATE et_base)
 # session.cpp/transport.cpp include ET's Headers.hpp directly, so they must
 # suppress httplib.h the same way et_base does when TLS is dropped -- linking
@@ -126,6 +136,60 @@ target_link_libraries(eternaltermlib PRIVATE et_base)
 if(NOT ET_HTTP_TLS)
   target_compile_definitions(eternaltermlib PUBLIC CPPHTTPLIB_HTTPLIB_H=1)
 endif()
+
+# --- Install / export (for consumers that don't add_subdirectory) -----------
+# The recommended consumption is still to vendor this repo and add_subdirectory()
+# it (that is how semicolyn embeds it, like extern/mosh). This install/export is
+# for consumers who prefer to `find_package(eternaltermlib)` against an install
+# tree. It exports the target eternaltermlib::eternaltermlib.
+#
+# eternaltermlib links et_base PRIVATE, but et_base is a separate STATIC archive
+# holding the ET transport objects, so a consumer linking the *installed* static
+# lib needs both archives on its link line. We install both and put et_base in
+# eternaltermlib's INTERFACE link libraries via the export set.
+include(CMakePackageConfigHelpers)
+
+# Promote the et_base dependency into the public link interface for the export
+# (a static consumer must link et_base too; PRIVATE would drop it from the
+# installed usage requirements).
+target_link_libraries(eternaltermlib INTERFACE et_base)
+
+install(TARGETS eternaltermlib et_base
+        EXPORT eternaltermlib-targets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES include/eternaltermlib.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT eternaltermlib-targets
+        FILE eternaltermlib-targets.cmake
+        NAMESPACE eternaltermlib::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/eternaltermlib)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/eternaltermlib-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+
+# Config: re-find every dependency whose IMPORTED target name appears in the
+# exported et_base link interface, BEFORE including the targets file. If any is
+# missing, set_target_properties() on the imported et_base fails with an unknown
+# target (e.g. OpenSSL::SSL). Protobuf is always needed; OpenSSL + ZLIB only when
+# this was built with ET_HTTP_TLS=ON (they are dropped otherwise). sodium is
+# linked by absolute path, so it needs no find_dependency.
+set(_etl_tls_config "")
+if(ET_HTTP_TLS)
+  set(_etl_tls_config "find_dependency(OpenSSL)\nfind_dependency(ZLIB)\n")
+endif()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/eternaltermlib-config.cmake"
+"include(CMakeFindDependencyMacro)\n\
+find_dependency(Protobuf)\n\
+${_etl_tls_config}\
+include(\"\${CMAKE_CURRENT_LIST_DIR}/eternaltermlib-targets.cmake\")\n")
+
+install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/eternaltermlib-config.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/eternaltermlib-config-version.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/eternaltermlib)
 
 enable_testing()
 add_subdirectory(test)
